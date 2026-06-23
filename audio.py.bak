@@ -1,0 +1,102 @@
+import queue
+import tempfile
+import numpy as np
+import sounddevice as sd
+import soundfile as sf
+
+from faster_whisper import WhisperModel
+
+# --------------------------
+# CONFIG
+# --------------------------
+SAMPLE_RATE = 16000
+BLOCK_SIZE = 512
+
+SILENCE_THRESHOLD = 0.01
+SILENCE_DURATION = 1.0
+
+# --------------------------
+# LOAD WHISPER
+# --------------------------
+print("Loading Whisper...")
+model = WhisperModel(
+    "tiny.en",
+    device="cpu",
+    compute_type="int8"
+)
+print("Ready.")
+
+audio_queue = queue.Queue()
+
+def callback(indata, frames, time, status):
+    audio_queue.put(indata.copy())
+
+print("Listening... (Ctrl+C to quit)")
+
+with sd.InputStream(
+    samplerate=SAMPLE_RATE,
+    channels=1,
+    blocksize=BLOCK_SIZE,
+    callback=callback
+):
+
+    recording = []
+    speaking = False
+    silence_blocks = 0
+
+    while True:
+
+        chunk = audio_queue.get()
+
+        volume = np.abs(chunk).mean()
+
+        if volume > SILENCE_THRESHOLD:
+
+            if not speaking:
+                print("\nSpeech detected...")
+                speaking = True
+                recording = []
+
+            recording.append(chunk)
+            silence_blocks = 0
+
+        elif speaking:
+
+            recording.append(chunk)
+            silence_blocks += 1
+
+            silence_time = (
+                silence_blocks * BLOCK_SIZE
+            ) / SAMPLE_RATE
+
+            if silence_time >= SILENCE_DURATION:
+
+                audio = np.concatenate(recording)
+
+                with tempfile.NamedTemporaryFile(
+                    suffix=".wav"
+                ) as f:
+
+                    sf.write(
+                        f.name,
+                        audio,
+                        SAMPLE_RATE
+                    )
+
+                    segments, _ = model.transcribe(
+                        f.name,
+                        language="en",
+                        beam_size=1,
+                        condition_on_previous_text=False
+                    )
+
+                    text = "".join(
+                        seg.text for seg in segments
+                    ).strip()
+
+                    if text:
+                        print(f"TEXT: {text}")
+
+                speaking = False
+                recording = []
+                silence_blocks = 0
